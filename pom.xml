@@ -609,6 +609,16 @@
                         </licenseSets>
                         <skipExistingHeaders>false</skipExistingHeaders>
                     </configuration>
+                    <executions>
+                        <execution>
+                            <goals>
+                                <goal>check</goal>
+                            </goals>
+                            <!-- mycila's check goal defaults to the 'validate' phase,
+                                 the earliest lifecycle phase. This ensures license:check
+                                 runs on every mvn compile/package/install automatically. -->
+                        </execution>
+                    </executions>
                 </plugin>
 
                 <!-- Release process and publishing -->

@@ -11,6 +11,7 @@ Thank you for your interest in contributing to Spector! We welcome contributions
 - [Troubleshooting First-Time Setup](#troubleshooting-first-time-setup)
 - [Making Changes](#making-changes)
 - [Coding Standards](#coding-standards)
+- [License Headers](#license-headers)
 - [Pull Request Process](#pull-request-process)
 - [Reporting Issues](#reporting-issues)
 
@@ -251,6 +252,34 @@ docs: add benchmark results to README
 - **Interface-first** — add interfaces before implementations for pluggability
 - **Zero-copy** — prefer `MemorySegment` slices over array copies
 
+## License Headers
+
+All source files (`.java`, `.ts`, `.js`, `.py`) must include a license header. The build enforces this automatically — `mvn compile` will fail if any file is missing a header.
+
+### Which license applies?
+
+| Module | License | Header |
+|--------|---------|--------|
+| `spector-memory`, `spector-synapse`, `spector-cortex` | Business Source License 1.1 | BSL header (see module's `src/license/bsl-header.txt`) |
+| All other modules | Apache License 2.0 | Apache header (see `src/license/apache2-header.txt`) |
+
+### Auto-fix missing headers
+
+Don't worry about writing headers by hand. Run this command and the correct header is added automatically:
+
+```bash
+mvn license:format
+```
+
+> **Tip:** Running `mvn compile` (or `mvn install`) will catch missing headers before you push — the license check runs as the very first build step.
+
+### What happens in CI?
+
+- **Same-repo PRs** (maintainer branches): CI will auto-commit the fix for you.
+- **Fork PRs** (external contributors): CI will post a comment with the exact command to run.
+
+You can always avoid this by running `mvn license:format` locally before pushing.
+
 ## Pull Request Process
 
 1. **Ensure your branch is up to date** with `main`
@@ -263,6 +292,7 @@ docs: add benchmark results to README
 ### PR Checklist
 
 - [ ] Code follows the project's coding standards
+- [ ] License headers present on all source files (`mvn license:format`)
 - [ ] Tests added/updated for the change
 - [ ] Javadoc updated for public API changes
 - [ ] No hardcoded secrets or credentials

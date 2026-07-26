@@ -1,0 +1,125 @@
+name: License Header Auto-Fix
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+    paths:
+      - '**.java'
+      - '**.ts'
+      - '**.js'
+      - '**.py'
+
+# Cancel in-progress runs for the same PR
+concurrency:
+  group: license-fix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix-license-headers:
+    runs-on: ubuntu-latest
+    name: Fix License Headers
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Check license headers
+        id: license-check
+        continue-on-error: true
+        run: |
+          if mvn -B license:check --no-transfer-progress 2>&1 | tee license-output.txt; then
+            echo "status=pass" >> $GITHUB_OUTPUT
+          else
+            echo "status=fail" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Format license headers
+        if: steps.license-check.outputs.status == 'fail'
+        run: |
+          mvn -B license:format --no-transfer-progress
+
+      - name: Check for changes
+        if: steps.license-check.outputs.status == 'fail'
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "### Files updated with license headers:" >> $GITHUB_STEP_SUMMARY
+            git diff --name-only >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ─── Same-repo PRs: auto-commit the fix ──────────────────────
+      - name: Commit license fixes (same-repo PRs)
+        if: |
+          steps.changes.outputs.has_changes == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          git config user.name "spectrayan-bot"
+          git config user.email "bot@spectrayan.dev"
+          git add -A
+          git commit -m "chore(license): auto-fix license headers
+
+          Applied by CI — see CONTRIBUTING.md#license-headers"
+          git push
+
+      # ─── Fork PRs: post a helpful comment ────────────────────────
+      - name: Comment on fork PRs
+        if: |
+          steps.changes.outputs.has_changes == 'true' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = require('child_process')
+              .execSync('git diff --name-only')
+              .toString().trim();
+            const fileCount = files.split('\n').length;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## 📋 License Headers Need Fixing
+
+            Some files are missing the required license headers. This is easy to fix!
+
+            **Run this command in your branch:**
+            \`\`\`bash
+            mvn license:format
+            \`\`\`
+
+            Then commit and push:
+            \`\`\`bash
+            git add -A && git commit -s -m "chore(license): add license headers" && git push
+            \`\`\`
+
+            <details>
+            <summary>Files that need headers (${fileCount} file${fileCount > 1 ? 's' : ''})</summary>
+
+            \`\`\`
+            ${files}
+            \`\`\`
+            </details>
+
+            > 💡 **Tip:** Running \`mvn compile\` locally will catch missing headers before you push.
+            > See our [Contributing Guide](https://github.com/spectrayan/spector/blob/main/CONTRIBUTING.md#license-headers) for details.`
+            });

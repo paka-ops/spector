@@ -54,12 +54,6 @@ jobs:
             -Dsurefire.useSystemClassLoader=false \
             -Dorg.slf4j.simpleLogger.defaultLogLevel=WARN
 
-      # ─── License Header Check (BSL 1.1) ────────────────────────────
-      - name: Check BSL license headers
-        run: |
-          mvn -B license:check -pl synapse/spector-synapse -Psynapse \
-            --no-transfer-progress
-
       # ─── Test Results ──────────────────────────────────────────────
       - name: Upload test results
         if: always()
