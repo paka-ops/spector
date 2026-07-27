@@ -15,6 +15,11 @@ package com.spectrayan.spector.memory.cortex;
 import com.spectrayan.spector.memory.synapse.CognitiveRecordLayout;
 import com.spectrayan.spector.memory.synapse.CognitiveRecordLayout.CognitiveHeader;
 import com.spectrayan.spector.memory.synapse.SynapticHeaderConstants;
+import com.spectrayan.spector.memory.kernel.MemoryId;
+import com.spectrayan.spector.memory.kernel.MemoryLayout;
+import com.spectrayan.spector.memory.kernel.MemoryShape;
+import com.spectrayan.spector.memory.kernel.layout.CognitiveRecordLayoutAdapter;
+import com.spectrayan.spector.memory.kernel.shape.AbstractRecordMemory;
 import com.spectrayan.spector.commons.error.ErrorCode;
 import com.spectrayan.spector.commons.error.SpectorStorageException;
 
@@ -78,6 +83,14 @@ public abstract class AbstractTierStore implements TierStore {
 
     private static final Logger log = LoggerFactory.getLogger(AbstractTierStore.class);
 
+    // ── Kernel Integration ──
+    // MemoryId provides stable identity for WAL targeting, metrics, and logs.
+    // Lazily initialized because type() is abstract and not available in the constructor.
+    // CognitiveRecordLayoutAdapter bridges the tier store's CognitiveRecordLayout
+    // to the kernel's MemoryLayout interface.
+    private volatile MemoryId memoryId;
+    private final CognitiveRecordLayoutAdapter layoutAdapter;
+
     /** Metadata header magic: "TIER" in ASCII. */
     static final int TIER_MAGIC = 0x54494552;
 
@@ -117,6 +130,9 @@ public abstract class AbstractTierStore implements TierStore {
     protected final MemorySegment segment;
     protected int count = 0;
 
+    /** Kernel backing — owns arena, segment, and file channel lifecycle. */
+    private final TierRecordBacking backing;
+
     /**
      * The number of records visible to concurrent readers.
      * Published with release semantics after each complete record write.
@@ -128,8 +144,6 @@ public abstract class AbstractTierStore implements TierStore {
     /** True if this store is backed by a file (persistent). */
     protected final boolean persistent;
 
-    /** File channel for persistent stores (null for volatile). */
-    private FileChannel fileChannel;
 
     /** File path for persistent stores (null for volatile). */
     private final Path filePath;
@@ -143,11 +157,19 @@ public abstract class AbstractTierStore implements TierStore {
      */
     protected AbstractTierStore(int quantizedVecBytes, int capacity, long segmentBytes) {
         this.layout = new CognitiveRecordLayout(quantizedVecBytes);
+        this.layoutAdapter = new CognitiveRecordLayoutAdapter(this.layout);
         this.capacity = capacity;
-        this.arena = Arena.ofShared();
-        this.segment = arena.allocate(segmentBytes, SynapticHeaderConstants.HEADER_BYTES);
         this.persistent = false;
         this.filePath = null;
+        // Kernel backing owns the arena and segment
+        Arena backingArena = Arena.ofShared();
+        MemorySegment backingSegment = backingArena.allocate(segmentBytes, SynapticHeaderConstants.HEADER_BYTES);
+        this.backing = new TierRecordBacking(
+                MemoryId.of("tier", "pending"), layoutAdapter, capacity,
+                backingArena, backingSegment, 0, false, null, null);
+        this.arena = backingArena;
+        this.segment = backingSegment;
+        this.memoryId = null;
     }
 
     /**
@@ -164,10 +186,12 @@ public abstract class AbstractTierStore implements TierStore {
      */
     protected AbstractTierStore(int quantizedVecBytes, int capacity, long segmentBytes, Path filePath) {
         this.layout = new CognitiveRecordLayout(quantizedVecBytes);
+        this.layoutAdapter = new CognitiveRecordLayoutAdapter(this.layout);
         this.capacity = capacity;
         this.persistent = true;
         this.filePath = filePath;
-        this.arena = Arena.ofShared();
+        Arena backingArena = Arena.ofShared();
+        this.memoryId = null;
 
         try {
             // Ensure parent directories exist
@@ -179,20 +203,27 @@ public abstract class AbstractTierStore implements TierStore {
             long totalBytes = METADATA_HEADER_BYTES + segmentBytes;
             boolean isNew = !Files.exists(filePath) || Files.size(filePath) < METADATA_HEADER_BYTES;
 
-            fileChannel = FileChannel.open(filePath,
+            FileChannel fc = FileChannel.open(filePath,
                     StandardOpenOption.CREATE,
                     StandardOpenOption.READ,
                     StandardOpenOption.WRITE);
 
             if (isNew) {
                 // Extend file to full size
-                fileChannel.position(totalBytes - 1);
-                fileChannel.write(ByteBuffer.wrap(new byte[]{0}));
+                fc.position(totalBytes - 1);
+                fc.write(ByteBuffer.wrap(new byte[]{0}));
             }
 
             // Map the entire file
-            long mapSize = Math.max(totalBytes, fileChannel.size());
-            this.segment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, mapSize, arena);
+            long mapSize = Math.max(totalBytes, fc.size());
+            MemorySegment mapped = fc.map(FileChannel.MapMode.READ_WRITE, 0, mapSize, backingArena);
+
+            // Kernel backing owns arena, segment, and file channel
+            this.backing = new TierRecordBacking(
+                    MemoryId.of("tier", "pending"), layoutAdapter, capacity,
+                    backingArena, mapped, 0, true, filePath, fc);
+            this.arena = backingArena;
+            this.segment = mapped;
 
             if (isNew) {
                 // Write fresh metadata header
@@ -364,6 +395,63 @@ public abstract class AbstractTierStore implements TierStore {
         return (float) tombstoneCount() / count;
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // KERNEL INTEGRATION
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Returns the stable kernel identity for this store.
+     *
+     * <p>Lazily initialized because {@link #type()} is abstract and not
+     * available during {@code AbstractTierStore} construction. Thread-safe
+     * via double-checked locking on a volatile field.</p>
+     *
+     * @return the kernel-compatible memory identifier
+     */
+    public MemoryId memoryId() {
+        MemoryId id = this.memoryId;
+        if (id == null) {
+            synchronized (this) {
+                id = this.memoryId;
+                if (id == null) {
+                    id = MemoryId.of("tier", type().name().toLowerCase());
+                    this.memoryId = id;
+                }
+            }
+        }
+        return id;
+    }
+
+    /**
+     * Returns the underlying kernel Memory backing for this tier store.
+     */
+    public TierRecordBacking backing() {
+        return this.backing;
+    }
+
+    /**
+     * Returns the kernel-compatible layout adapter for this store.
+     *
+     * <p>Bridges the existing {@link CognitiveRecordLayout} to the kernel's
+     * {@link MemoryLayout} interface, enabling kernel consumers to read
+     * stride, layoutId, and schema version from tier stores.</p>
+     *
+     * @return the cognitive record layout adapter
+     */
+    public CognitiveRecordLayoutAdapter kernelLayout() {
+        return layoutAdapter;
+    }
+
+    /**
+     * Returns the kernel shape classification for this store.
+     *
+     * @return {@link MemoryShape#RECORD} for all tier stores
+     */
+    public MemoryShape kernelShape() {
+        return MemoryShape.RECORD;
+    }
+
+
     @Override
     public void close() {
         log.info("{} closing ({} records, persistent={})", getClass().getSimpleName(), count, persistent);
@@ -376,14 +464,32 @@ public abstract class AbstractTierStore implements TierStore {
                 log.debug("Error forcing segment: {}", e.getMessage());
             }
         }
-        arena.close();
-        if (fileChannel != null) {
-            try {
-                fileChannel.close();
-            } catch (IOException e) {
-                log.debug("Error closing file channel: {}", e.getMessage());
-            }
+        // Delegate lifecycle to kernel backing (closes arena + file channel)
+        backing.close();
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // KERNEL BACKING
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * Concrete kernel {@link AbstractRecordMemory} backing for tier stores.
+     *
+     * <p>This class exists solely to provide a concrete instantiation of
+     * the kernel's {@code AbstractRecordMemory} hierarchy. It receives
+     * ownership of the arena, segment, and file channel from the enclosing
+     * tier store and handles close/flush lifecycle.</p>
+     *
+     * <p>The tier store delegates arena/segment ownership to this backing.
+     * Tier-specific logic (SWMR, cognitive headers, tombstones) remains
+     * in {@code AbstractTierStore}.</p>
+     */
+    static final class TierRecordBacking extends AbstractRecordMemory<CognitiveRecordLayoutAdapter> {
+
+        TierRecordBacking(MemoryId id, CognitiveRecordLayoutAdapter layout, int capacity,
+                          Arena arena, MemorySegment segment, int count,
+                          boolean persistent, Path filePath, FileChannel fileChannel) {
+            super(id, layout, capacity, arena, segment, count, persistent, filePath, fileChannel);
         }
     }
 }
-

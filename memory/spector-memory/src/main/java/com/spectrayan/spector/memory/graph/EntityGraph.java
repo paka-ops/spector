@@ -28,6 +28,12 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+
+import com.spectrayan.spector.memory.kernel.MemoryId;
+import com.spectrayan.spector.memory.kernel.MemoryShape;
+import com.spectrayan.spector.memory.sync.MemoryWal;
+import java.nio.charset.StandardCharsets;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -82,7 +88,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *     [memIdx:4B][weight:4B]
  * </pre>
  */
-public final class EntityGraph implements AutoCloseable {
+public final class EntityGraph implements AutoCloseable, com.spectrayan.spector.memory.kernel.shape.GraphMemory<com.spectrayan.spector.memory.kernel.layout.EntityLayout> {
 
     private static final Logger log = LoggerFactory.getLogger(EntityGraph.class);
 
@@ -200,6 +206,11 @@ public final class EntityGraph implements AutoCloseable {
     /** Edge importance scorer (configurable weights). */
     private final EdgeImportance edgeImportance;
 
+    private final MemoryId memoryId;
+
+    private MemoryWal wal;
+    private boolean bypassWal = false;
+
     /**
      * Creates a new entity graph with default max degree.
      *
@@ -240,6 +251,7 @@ public final class EntityGraph implements AutoCloseable {
         this.mmapFilePath = null;
         this.entityTypeRegistry = TypeRegistry.seeded("entity-type", EntityType.SEED);
         this.relationTypeRegistry = TypeRegistry.seeded("relation-type", RelationType.SEED);
+        this.memoryId = MemoryId.of("graph", "entity");
 
         log.info("EntityGraph initialized (heap): entities={}, edges={}, maxDegree={}, adjSlots={}, memory={}KB",
                 entityCapacity, edgeCapacity, maxDegree, adjSegmentCapacity,
@@ -393,6 +405,7 @@ public final class EntityGraph implements AutoCloseable {
                 this.entityTypeRegistry = TypeRegistry.seeded("entity-type", EntityType.SEED);
                 this.relationTypeRegistry = TypeRegistry.seeded("relation-type", RelationType.SEED);
             }
+            this.memoryId = MemoryId.of("graph", "entity");
 
             log.info("EntityGraph initialized (mmap): entities={}/{}, edges={}/{}, maxDegree={}, version={}, file={}",
                     this.entityCount, this.entityCapacity, this.edgeCount, this.edgeCapacity,
@@ -470,6 +483,7 @@ public final class EntityGraph implements AutoCloseable {
         this.mmapFilePath = null;
         this.entityTypeRegistry = entityTypeRegistry;
         this.relationTypeRegistry = relationTypeRegistry;
+        this.memoryId = MemoryId.of("graph", "entity");
     }
 
     /**
@@ -495,6 +509,9 @@ public final class EntityGraph implements AutoCloseable {
         }
 
         int entityId = entityCount++;
+        if (wal != null && !bypassWal) {
+            wal.appendGraphAddNode(memoryId.toString(), entityId, normalized, type);
+        }
         long offset = (long) entityId * ENTITY_NODE_BYTES;
         int typeId = entityTypeRegistry.getOrRegister(type);
 
@@ -525,6 +542,10 @@ public final class EntityGraph implements AutoCloseable {
         if (fromEntity < 0 || fromEntity >= entityCount) return;
         if (toEntity < 0 || toEntity >= entityCount) return;
         if (fromEntity == toEntity) return;
+
+        if (wal != null && !bypassWal) {
+            wal.appendAdjAddEdge(memoryId.toString(), fromEntity, toEntity, (type != null ? type : "OTHER").getBytes(StandardCharsets.UTF_8));
+        }
 
         int typeId = relationTypeRegistry.getOrRegister(type != null ? type : "OTHER");
         long entityOffset = (long) fromEntity * ENTITY_NODE_BYTES;
@@ -718,6 +739,9 @@ public final class EntityGraph implements AutoCloseable {
 
         graphLock.lock();
         try {
+            if (wal != null && !bypassWal) {
+                wal.appendGraphLinkMemory(memoryId.toString(), entityId, memoryIdx);
+            }
             long entOffset = (long) entityId * ENTITY_NODE_BYTES;
             int adjOff = entitySegment.get(ValueLayout.JAVA_INT, entOffset + ENT_OFF_ADJ_OFFSET);
             int adjCnt = entitySegment.get(ValueLayout.JAVA_INT, entOffset + ENT_OFF_ADJ_COUNT);
@@ -1660,8 +1684,8 @@ public final class EntityGraph implements AutoCloseable {
     MemorySegment adjacencySegment() { return adjacencySegment; }
     int adjSegmentCapacity() { return adjSegmentCapacity; }
     ConcurrentHashMap<String, Integer> nameIndexInternal() { return nameIndex; }
-    TypeRegistry entityTypeRegistry() { return entityTypeRegistry; }
-    TypeRegistry relationTypeRegistry() { return relationTypeRegistry; }
+    public TypeRegistry entityTypeRegistry() { return entityTypeRegistry; }
+    public TypeRegistry relationTypeRegistry() { return relationTypeRegistry; }
 
     /**
      * Resets all entities, edges, and adjacency data by zero-filling segments.
@@ -1685,6 +1709,101 @@ public final class EntityGraph implements AutoCloseable {
         } finally {
             graphLock.unlock();
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // KERNEL INTEGRATION
+    // ══════════════════════════════════════════════════════════════
+
+    @Override
+    public MemoryId id() {
+        return memoryId;
+    }
+
+    @Override
+    public com.spectrayan.spector.memory.kernel.layout.EntityLayout layout() {
+        return new com.spectrayan.spector.memory.kernel.layout.EntityLayout();
+    }
+
+    @Override
+    public Arena arena() {
+        return arena;
+    }
+
+    @Override
+    public MemorySegment segment() {
+        return entitySegment;
+    }
+
+    @Override
+    public int size() {
+        return entityCount;
+    }
+
+    @Override
+    public int capacity() {
+        return entityCapacity;
+    }
+
+    @Override
+    public int schemaVersion() {
+        return 2;
+    }
+
+    @Override
+    public MemoryShape shape() {
+        return MemoryShape.GRAPH;
+    }
+
+    @Override
+    public void flush() {
+        if (entitySegment != null) entitySegment.force();
+        if (edgeSegment != null) edgeSegment.force();
+        if (adjacencySegment != null) adjacencySegment.force();
+    }
+
+    @Override
+    public int addEdge(int fromNode, int toNode, MemorySegment edgeBytes) {
+        addRelation(fromNode, toNode, "related_to");
+        return edgeCount();
+    }
+
+    @Override
+    public void removeEdge(int edgeId) {
+        // EntityGraph handles edges in adjacency segments; direct removal by id is managed via decay/compaction.
+    }
+
+    @Override
+    public java.util.PrimitiveIterator.OfInt neighbours(int nodeId) {
+        return edges(nodeId).stream().mapToInt(EntityEdge::targetEntityId).iterator();
+    }
+
+    @Override
+    public int nodeCount() {
+        return entityCount;
+    }
+
+    public MemoryId memoryId() {
+        return memoryId;
+    }
+
+    public MemoryShape kernelShape() {
+        return MemoryShape.GRAPH;
+    }
+
+    @Override
+    public void bindWal(MemoryWal wal) {
+        this.wal = wal;
+    }
+
+    @Override
+    public void setBypassWal(boolean bypass) {
+        this.bypassWal = bypass;
+    }
+
+    @Override
+    public MemoryWal getWal() {
+        return this.wal;
     }
 
     @Override

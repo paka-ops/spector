@@ -21,6 +21,11 @@ import com.spectrayan.spector.memory.hebbian.HebbianGraph.HebbianEdge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.spectrayan.spector.memory.kernel.MemoryId;
+import com.spectrayan.spector.memory.kernel.MemoryShape;
+import com.spectrayan.spector.memory.sync.MemoryWal;
+import java.nio.ByteBuffer;
+
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -89,7 +94,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * @see HebbianGraph
  */
-public final class HebbianGraphCsr implements HebbianGraphBase {
+public final class HebbianGraphCsr implements HebbianGraphBase, com.spectrayan.spector.memory.kernel.shape.GraphMemory<com.spectrayan.spector.memory.kernel.layout.HebbianLayout> {
 
     private static final Logger log = LoggerFactory.getLogger(HebbianGraphCsr.class);
 
@@ -173,6 +178,9 @@ public final class HebbianGraphCsr implements HebbianGraphBase {
     private volatile long lastActivityMs = System.currentTimeMillis();
     private volatile long sessionBoundaryMs = 30 * 60 * 1000L;
     private volatile HebbianGraph.DecayModulator decayModulator;
+    private final MemoryId memoryId;
+    private MemoryWal wal;
+    private boolean bypassWal = false;
 
     // ══════════════════════════════════════════════════════════════
     // CONSTRUCTORS
@@ -210,6 +218,7 @@ public final class HebbianGraphCsr implements HebbianGraphBase {
 
         // Overflow storage (heap)
         this.overflow = new List[capacity];
+        this.memoryId = MemoryId.of("graph", "hebbian-csr");
 
         long totalKB = (offsetBytes + edgeBytes) / 1024;
         log.info("HebbianGraphCsr initialized (heap): capacity={}, edgeCap={}, maxDegree={}, memory={}KB",
@@ -241,6 +250,13 @@ public final class HebbianGraphCsr implements HebbianGraphBase {
         try {
             if (nodeA < 0 || nodeA >= capacity || nodeB < 0 || nodeB >= capacity) return;
             if (nodeA == nodeB) return;
+
+            if (wal != null && !bypassWal) {
+                ByteBuffer buf = ByteBuffer.allocate(4);
+                buf.putFloat(weightDelta);
+                wal.appendAdjAddEdge(memoryId.toString(), nodeA, nodeB, buf.array());
+            }
+
             addOrUpdateEdge(nodeA, nodeB, weightDelta);
             addOrUpdateEdge(nodeB, nodeA, weightDelta);
             lastActivityMs = System.currentTimeMillis();
@@ -464,6 +480,110 @@ public final class HebbianGraphCsr implements HebbianGraphBase {
      */
     public long memoryUsageBytes() {
         return offsets.byteSize() + edges.byteSize();
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // KERNEL INTEGRATION
+    // ══════════════════════════════════════════════════════════════
+
+    @Override
+    public MemoryId id() {
+        return memoryId;
+    }
+
+    @Override
+    public com.spectrayan.spector.memory.kernel.layout.HebbianLayout layout() {
+        return new com.spectrayan.spector.memory.kernel.layout.HebbianLayout();
+    }
+
+    @Override
+    public Arena arena() {
+        return arena;
+    }
+
+    @Override
+    public MemorySegment segment() {
+        return edges;
+    }
+
+    @Override
+    public int size() {
+        return totalEdges();
+    }
+
+    @Override
+    public int schemaVersion() {
+        return 1;
+    }
+
+    @Override
+    public MemoryShape shape() {
+        return MemoryShape.GRAPH;
+    }
+
+    @Override
+    public void flush() {
+        try {
+            if (edges != null) edges.force();
+        } catch (UnsupportedOperationException ignored) {}
+        try {
+            if (offsets != null) offsets.force();
+        } catch (UnsupportedOperationException ignored) {}
+    }
+
+    @Override
+    public int addEdge(int fromNode, int toNode, MemorySegment edgeBytes) {
+        strengthen(fromNode, toNode, 1.0f);
+        return totalEdges();
+    }
+
+    @Override
+    public void removeEdge(int edgeId) {
+        // CSR decays and compacts edges; explicit tombstoning is not supported on raw ID.
+    }
+
+    @Override
+    public java.util.PrimitiveIterator.OfInt neighbours(int nodeId) {
+        return neighbors(nodeId).stream().mapToInt(HebbianEdge::neighborIndex).iterator();
+    }
+
+    @Override
+    public int edgeCount() {
+        return totalEdges();
+    }
+
+    @Override
+    public int nodeCount() {
+        int activeNodes = 0;
+        for (int i = 0; i < capacity; i++) {
+            if (degree(i) > 0) {
+                activeNodes++;
+            }
+        }
+        return activeNodes;
+    }
+
+    public MemoryId memoryId() {
+        return memoryId;
+    }
+
+    public MemoryShape kernelShape() {
+        return MemoryShape.GRAPH;
+    }
+
+    @Override
+    public void bindWal(MemoryWal wal) {
+        this.wal = wal;
+    }
+
+    @Override
+    public void setBypassWal(boolean bypass) {
+        this.bypassWal = bypass;
+    }
+
+    @Override
+    public MemoryWal getWal() {
+        return this.wal;
     }
 
     @Override

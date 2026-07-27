@@ -46,6 +46,7 @@ import com.spectrayan.spector.memory.graph.CognitiveGraphFacade;
 import com.spectrayan.spector.memory.graph.EntityExtractionMode;
 import com.spectrayan.spector.memory.graph.EntityExtractor;
 import com.spectrayan.spector.memory.graph.EntityGraph;
+import com.spectrayan.spector.memory.graph.TypeRegistry;
 import com.spectrayan.spector.memory.graph.HyperEntityGraph;
 import com.spectrayan.spector.memory.graph.LlmEntityExtractor;
 import com.spectrayan.spector.memory.graph.NoOpEntityExtractor;
@@ -75,7 +76,15 @@ import com.spectrayan.spector.memory.sync.CheckpointDaemon;
 import com.spectrayan.spector.memory.synapse.SynapticHeaderConstants;
 import com.spectrayan.spector.memory.namespace.SpectorNamespaceManager;
 import com.spectrayan.spector.memory.temporal.TemporalChain;
+import com.spectrayan.spector.memory.temporal.TemporalKnowledgeGraph;
 import com.spectrayan.spector.memory.pipeline.AttachmentProcessor;
+import com.spectrayan.spector.memory.sync.WalRecoveryDispatcher;
+import com.spectrayan.spector.memory.sync.WalEvent;
+import com.spectrayan.spector.memory.kernel.Memory;
+import com.spectrayan.spector.memory.kernel.MemoryId;
+import java.nio.file.Files;
+import java.util.List;
+import java.nio.ByteBuffer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,6 +125,7 @@ public final class SpectorMemoryFactory {
             MemoryWal wal,
             HebbianGraphBase hebbianGraph,
             TemporalChain temporalChain,
+            TemporalKnowledgeGraph temporalKnowledgeGraph,
             EntityGraph entityGraph,
             HyperEntityGraph hyperEntityGraph,
             CognitiveGraphFacade graphFacade,
@@ -381,6 +391,16 @@ public final class SpectorMemoryFactory {
             hyperEntityGraph = null;
         }
 
+        TemporalKnowledgeGraph temporalKnowledgeGraph;
+        TypeRegistry predRegistry = (entityGraph != null) ? entityGraph.relationTypeRegistry() : new TypeRegistry("relation-type");
+        if (isDisk && basePath != null) {
+            Path runtimeTkg = StorageLayout.temporalFactsRuntime(basePath);
+            long initialSize = 16L * 1024 * 1024; // 16MB
+            temporalKnowledgeGraph = new TemporalKnowledgeGraph(runtimeTkg, initialSize, predRegistry);
+        } else {
+            temporalKnowledgeGraph = new TemporalKnowledgeGraph(predRegistry);
+        }
+
         // -€-€ BM25 Text Search -€-€
         MemoryBM25Index bm25Index;
         TextDataStore textDataStore;
@@ -476,6 +496,9 @@ public final class SpectorMemoryFactory {
                     tierRouter, null,
                     index, hebbianGraph, temporalChain, cognitiveTarget);
         }
+
+        // -€-€ WAL Recovery -€-€
+        performWalRecovery(wal, tierRouter, index, hebbianGraph, temporalChain, temporalKnowledgeGraph, entityGraph, coActivationTracker, cognitiveTarget, basePath);
 
         // -€-€ Semantic Recall Strategy + HNSW Rebuild -€-€
         SemanticRecallStrategy semanticStrategy = null;
@@ -574,6 +597,7 @@ public final class SpectorMemoryFactory {
                 reinforcementHandler, valenceTracker, coActivationTracker,
                 suppressionSet, habituationPenalty, prospectiveScheduler,
                 introspector, lateralEvaluator, wal, hebbianGraph, temporalChain,
+                temporalKnowledgeGraph,
                 entityGraph, hyperEntityGraph, graphFacade, idGenerator,
                 checkpointDaemon, daemonSupervisor, bm25Index, attachmentProcessor,
                 parallelPipeline, embedConfig, resolvedPartitionDir, basePath,
@@ -680,6 +704,161 @@ public final class SpectorMemoryFactory {
                 log.warn("Could not set strict file permissions on temporary directory: {}", tempDir);
             }
             return tempDir;
+        }
+    }
+
+    private static void performWalRecovery(
+            MemoryWal wal,
+            TierRouter tierRouter,
+            MemoryIndex index,
+            HebbianGraphBase hebbianGraph,
+            TemporalChain temporalChain,
+            TemporalKnowledgeGraph temporalKnowledgeGraph,
+            EntityGraph entityGraph,
+            CoActivationTracker coActivationTracker,
+            CognitiveIngestionTarget cognitiveTarget,
+            Path basePath) {
+        
+        if (wal == null || !wal.isPersistent()) {
+            return;
+        }
+        
+        long checkpointHwm = 0;
+        if (basePath != null) {
+            Path metaPath = StorageLayout.checkpointMeta(basePath);
+            if (Files.exists(metaPath)) {
+                checkpointHwm = CheckpointDaemon.readCheckpointHwm(metaPath);
+                log.info("WAL recovery: loaded checkpoint HWM {}", checkpointHwm);
+            }
+        }
+        
+        List<WalEvent> events = wal.replay(checkpointHwm);
+        if (events.isEmpty()) {
+            log.info("WAL recovery: no events to replay after HWM {}", checkpointHwm);
+            return;
+        }
+        
+        log.info("WAL recovery: replaying {} events after HWM {}", events.size(), checkpointHwm);
+        
+        // 1. Gather all shape-specific Memory instances
+        java.util.Map<MemoryId, Memory<?>> memories = new java.util.HashMap<>();
+        
+        if (tierRouter != null) {
+            if (tierRouter.working() != null) {
+                Memory<?> backing = tierRouter.working().backing();
+                memories.put(backing.id(), backing);
+            }
+            if (tierRouter.semantic() != null) {
+                Memory<?> backing = tierRouter.semantic().backing();
+                memories.put(backing.id(), backing);
+            }
+            if (tierRouter.procedural() != null) {
+                Memory<?> backing = tierRouter.procedural().backing();
+                memories.put(backing.id(), backing);
+            }
+            if (tierRouter.episodic() != null) {
+                Memory<?> backing = tierRouter.episodic().backing();
+                memories.put(backing.id(), backing);
+            }
+        }
+        
+        if (entityGraph != null) {
+            memories.put(entityGraph.id(), entityGraph);
+        }
+        if (hebbianGraph instanceof HebbianGraphCsr hg) {
+            memories.put(hg.id(), hg);
+        }
+        if (temporalChain != null) {
+            memories.put(MemoryId.of("temporal", "chain"), temporalChain);
+        }
+        if (temporalKnowledgeGraph != null) {
+            memories.put(temporalKnowledgeGraph.id(), temporalKnowledgeGraph.backing());
+        }
+
+        // Add textDataStore backing memory if available
+        MemoryId textId = MemoryId.of("cortex", "text");
+        if (index.textDataStore() != null) {
+            memories.put(textId, index.textDataStore().backing());
+        }
+
+        long countBeforeRecovery = 0;
+        Memory<?> textMem = memories.get(textId);
+        if (textMem instanceof com.spectrayan.spector.memory.kernel.shape.AppendMemory<?> am) {
+            countBeforeRecovery = am.appendCursor();
+        }
+        
+        // 2. Dispatch shape mutations directly to target memory segments
+        WalRecoveryDispatcher.recover(wal, memories);
+        
+        // 3. Rebuild MemoryIndex on-heap maps from high-level REMEMBER/FORGET/REINFORCE events
+        long lastRecordOffset = -1;
+        MemoryType lastRecordType = null;
+        long lastTextOffset = -1;
+        int lastTextLength = -1;
+        long currentTextCursor = countBeforeRecovery;
+        
+        for (WalEvent event : events) {
+            if (event.sequence() <= checkpointHwm) {
+                continue;
+            }
+            
+            try {
+                switch (event.type()) {
+                    case RECORD_WRITE -> {
+                        ByteBuffer buf = java.nio.ByteBuffer.wrap(event.payload());
+                        long recordId = buf.getLong();
+                        MemoryId targetId = MemoryId.parse(event.memoryId());
+                        Memory<?> target = memories.get(targetId);
+                        if (target instanceof com.spectrayan.spector.memory.kernel.shape.RecordMemory<?> rm) {
+                            lastRecordOffset = rm.recordOffset(recordId);
+                            String pathName = targetId.memoryName();
+                            if ("working".equals(pathName)) lastRecordType = MemoryType.WORKING;
+                            else if ("semantic".equals(pathName)) lastRecordType = MemoryType.SEMANTIC;
+                            else if ("procedural".equals(pathName)) lastRecordType = MemoryType.PROCEDURAL;
+                            else if ("episodic".equals(pathName)) lastRecordType = MemoryType.EPISODIC;
+                        }
+                    }
+                    case APPEND -> {
+                        MemoryId targetId = MemoryId.parse(event.memoryId());
+                        if ("cortex".equals(targetId.namespace()) && "text".equals(targetId.memoryName())) {
+                            lastTextOffset = currentTextCursor;
+                            lastTextLength = event.payload().length;
+                            currentTextCursor += 4 + lastTextLength;
+                        }
+                    }
+                    case REMEMBER -> {
+                        if (lastRecordOffset != -1 && lastRecordType != null) {
+                            // CognitiveRecordLayout has dynamic stride
+                            int stride = 164; // default
+                            MemoryId targetId = MemoryId.of("tier", lastRecordType.name().toLowerCase());
+                            Memory<?> target = memories.get(targetId);
+                            if (target != null) {
+                                stride = target.layout().recordStride();
+                            }
+                            int storeIndex = (int) (lastRecordOffset / stride);
+                            com.spectrayan.spector.memory.index.MemoryIndex.MemoryLocation loc =
+                                    new com.spectrayan.spector.memory.index.MemoryIndex.MemoryLocation(
+                                            lastRecordType, lastRecordOffset, -1, lastTextOffset, lastTextLength);
+                            
+                            String text = "";
+                            if (index.textDataStore() != null && lastTextOffset != -1) {
+                                try {
+                                    text = index.textDataStore().readTextDirect(lastTextOffset, lastTextLength);
+                                } catch (Exception ignored) {}
+                            }
+                            
+                            index.register(event.memoryId(), loc, text, MemorySource.OBSERVED, new String[0]);
+                        }
+                    }
+                    case FORGET -> {
+                        index.remove(event.memoryId());
+                    }
+                    default -> {}
+                }
+            } catch (Exception e) {
+                log.warn("WAL recovery index sync failed for event seq={}, type={}: {}", 
+                        event.sequence(), event.type(), e.getMessage());
+            }
         }
     }
 }
