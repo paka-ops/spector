@@ -31,7 +31,7 @@ import com.spectrayan.spector.memory.model.SourceModality;
 import com.spectrayan.spector.memory.model.RecallOptions;
 import com.spectrayan.spector.memory.model.ScoreBreakdown;
 import com.spectrayan.spector.memory.model.TextSearchMode;
-import com.spectrayan.spector.memory.cortex.AbstractTierStore;
+import com.spectrayan.spector.memory.cortex.AbstractCognitiveRecordMemory;
 import com.spectrayan.spector.memory.cortex.EpisodicMemoryStore.EpisodicPartition;
 import com.spectrayan.spector.memory.cortex.MemoryBM25Index;
 import com.spectrayan.spector.memory.cortex.MemoryBM25Index.BM25Candidate;
@@ -1056,7 +1056,7 @@ public final class RecallPipeline {
                 try {
                     return scoreStoreToList(
                             seg, tierRouter.working().visibleCount(),
-                            tierRouter.working().layout(), queryVector, options, nowMs,
+                            tierRouter.working().cognitiveLayout(), queryVector, options, nowMs,
                             MemoryType.WORKING, 0L);
                 } finally {
                     NativeOsMemory.advise(seg, NativeOsMemory.MADV_NORMAL);
@@ -1098,8 +1098,8 @@ public final class RecallPipeline {
                         try {
                             return scoreHeaderSlabToList(
                                     seg, tierRouter.semantic().visibleCount(),
-                                    tierRouter.semantic().layout(), queryVector, options, nowMs,
-                                    tierRouter.semantic().isPersistent() ? AbstractTierStore.METADATA_HEADER_BYTES : 0);
+                                    tierRouter.semantic().cognitiveLayout(), queryVector, options, nowMs,
+                                    tierRouter.semantic().isPersistent() ? AbstractCognitiveRecordMemory.METADATA_HEADER_BYTES : 0);
                         } finally {
                             NativeOsMemory.advise(seg, NativeOsMemory.MADV_NORMAL);
                         }
@@ -1117,7 +1117,7 @@ public final class RecallPipeline {
                 try {
                     return scoreStoreToList(
                             seg, tierRouter.procedural().visibleCount(),
-                            tierRouter.procedural().layout(), queryVector, options, nowMs,
+                            tierRouter.procedural().cognitiveLayout(), queryVector, options, nowMs,
                             MemoryType.PROCEDURAL, 0L);
                 } finally {
                     NativeOsMemory.advise(seg, NativeOsMemory.MADV_NORMAL);
@@ -1137,7 +1137,7 @@ public final class RecallPipeline {
         if (TierRouter.shouldScan(MemoryType.WORKING, targetTypes)
                 && tierRouter.working().visibleCount() > 0) {
             results.addAll(scoreStoreToList(tierRouter.working().segment(),
-                    tierRouter.working().visibleCount(), tierRouter.working().layout(),
+                    tierRouter.working().visibleCount(), tierRouter.working().cognitiveLayout(),
                     queryVector, options, nowMs, MemoryType.WORKING, 0L));
         }
         if (TierRouter.shouldScan(MemoryType.EPISODIC, targetTypes)) {
@@ -1154,16 +1154,16 @@ public final class RecallPipeline {
                     results.addAll(semanticRecallStrategy.recall(queryVector, options, nowMs));
                 } else {
                     results.addAll(scoreHeaderSlabToList(tierRouter.semantic().headerSlab(),
-                            tierRouter.semantic().visibleCount(), tierRouter.semantic().layout(),
+                            tierRouter.semantic().visibleCount(), tierRouter.semantic().cognitiveLayout(),
                             queryVector, options, nowMs,
-                            tierRouter.semantic().isPersistent() ? AbstractTierStore.METADATA_HEADER_BYTES : 0));
+                            tierRouter.semantic().isPersistent() ? AbstractCognitiveRecordMemory.METADATA_HEADER_BYTES : 0));
                 }
             }
         }
         if (TierRouter.shouldScan(MemoryType.PROCEDURAL, targetTypes)
                 && tierRouter.procedural().visibleCount() > 0) {
             results.addAll(scoreStoreToList(tierRouter.procedural().segment(),
-                    tierRouter.procedural().visibleCount(), tierRouter.procedural().layout(),
+                    tierRouter.procedural().visibleCount(), tierRouter.procedural().cognitiveLayout(),
                     queryVector, options, nowMs, MemoryType.PROCEDURAL, 0L));
         }
         return results;

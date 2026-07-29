@@ -32,12 +32,11 @@ import com.spectrayan.spector.memory.amygdala.ValenceTracker;
 import com.spectrayan.spector.memory.cortex.CentroidRouter;
 import com.spectrayan.spector.memory.cortex.EpisodicMemoryStore;
 import com.spectrayan.spector.memory.cortex.MemorySource;
-import com.spectrayan.spector.memory.cortex.ProceduralMemoryStore;
-import com.spectrayan.spector.memory.cortex.SemanticMemoryStore;
-
+import com.spectrayan.spector.memory.cortex.ProceduralRecordMemory;
+import com.spectrayan.spector.memory.cortex.SemanticRecordMemory;
 import com.spectrayan.spector.memory.cortex.SemanticRecallStrategy;
 import com.spectrayan.spector.memory.cortex.TierRouter;
-import com.spectrayan.spector.memory.cortex.WorkingMemoryStore;
+import com.spectrayan.spector.memory.cortex.WorkingRecordMemory;
 import com.spectrayan.spector.memory.cortex.MemoryBM25Index;
 import com.spectrayan.spector.memory.cortex.TextAppendMemory;
 import com.spectrayan.spector.memory.dopamine.FlashbulbPolicy;
@@ -1247,7 +1246,7 @@ public final class DefaultSpectorMemory implements SpectorMemory, SpectorMemoryA
     public CompactionResult vacuum(MemoryType tier) {
         TierRouter router = partitionManager.tierRouter();
         com.spectrayan.spector.memory.cortex.TierStore store = router.get(tier);
-        if (!(store instanceof com.spectrayan.spector.memory.cortex.AbstractTierStore ats)) {
+        if (!(store instanceof com.spectrayan.spector.memory.cortex.AbstractCognitiveRecordMemory ats)) {
             log.warn("Vacuum: tier {} is not compactable", tier);
             return null;
         }
@@ -1265,7 +1264,7 @@ public final class DefaultSpectorMemory implements SpectorMemory, SpectorMemoryA
         java.util.Map<MemoryType, Float> ratios = new java.util.EnumMap<>(MemoryType.class);
         for (MemoryType type : MemoryType.values()) {
             com.spectrayan.spector.memory.cortex.TierStore store = router.get(type);
-            if (store instanceof com.spectrayan.spector.memory.cortex.AbstractTierStore ats) {
+            if (store instanceof com.spectrayan.spector.memory.cortex.AbstractCognitiveRecordMemory ats) {
                 ratios.put(type, ats.tombstoneRatio());
             }
         }

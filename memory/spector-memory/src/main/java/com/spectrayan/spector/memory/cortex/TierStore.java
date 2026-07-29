@@ -34,7 +34,7 @@ import java.lang.foreign.MemorySegment;
  *   <li>{@link ProceduralMemoryStore} — small append-only store (Basal Ganglia)</li>
  * </ul>
  *
- * @see AbstractTierStore for common implementation
+ * @see AbstractCognitiveRecordMemory for common implementation
  * @see TierRouter for polymorphic dispatch
  */
 public interface TierStore extends AutoCloseable {
@@ -63,9 +63,14 @@ public interface TierStore extends AutoCloseable {
 
 
     /**
-     * Returns the record layout for this store.
+     * Returns the kernel record layout adapter for this store.
      */
-    CognitiveRecordLayout layout();
+    com.spectrayan.spector.memory.kernel.layout.CognitiveRecordLayoutAdapter layout();
+
+    /**
+     * Returns the underlying cognitive record layout for this store.
+     */
+    CognitiveRecordLayout cognitiveLayout();
 
     /**
      * Returns the primary memory segment for this store.
