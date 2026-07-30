@@ -65,7 +65,7 @@ public class SpectorClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final Duration requestTimeout;
 
-    private SpectorClient(Builder builder) {
+    public SpectorClient(Builder builder) {
         this.baseUrl = "http://" + builder.host + ":" + builder.port;
         this.apiKey = builder.apiKey;
         this.requestTimeout = builder.requestTimeout;
@@ -422,7 +422,7 @@ public class SpectorClient implements AutoCloseable {
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
 
-        private Builder() {}
+        public Builder() {}
 
         /** Sets the server host (default: localhost). */
         public Builder host(String host) {
