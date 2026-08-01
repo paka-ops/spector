@@ -84,7 +84,7 @@ public class SpectorClient implements AutoCloseable {
     /**
      * Creates a new builder for SpectorClient.
      */
-    public static Builder builder() {
+    private static Builder builder() {
         return new Builder();
     }
 
@@ -422,7 +422,7 @@ public class SpectorClient implements AutoCloseable {
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
 
-        public Builder() {}
+        private Builder() {}
 
         /** Sets the server host (default: localhost). */
         public Builder host(String host) {
