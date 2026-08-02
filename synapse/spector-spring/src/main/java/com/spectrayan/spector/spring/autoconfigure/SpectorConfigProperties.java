@@ -152,11 +152,11 @@ public class SpectorConfigProperties {
             this.timeout = timeout;
         }
 
-        public String getapiKey() {
+        public String getApiKey() {
             return apiKey;
         }
 
-        public void setapiKey(String apiKey) {
+        public void setApiKey(String apiKey) {
             this.apiKey = apiKey;
         }
 
