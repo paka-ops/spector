@@ -260,15 +260,17 @@ class SpectorAutoConfigurationTest {
         });
     }
     @Test
-    void shouldProvideSpectorClientBean(){
+    void shouldNotProvideSpectorClientBean(){
         contextRunner.run(context -> {
-            assertThat(context).hasSingleBean(SpectorClient.class);
+            assertThat(context).doesNotHaveBean(SpectorClient.class);
         });
     }
     @Test
     void shouldProvideSpectorClientWithClientPropertiesBean(){
-        contextRunner.withPropertyValues("spector.client.host=http://192.168.1.1","spector.client.port=36","spector.client.api_key=dgg").run(context -> {
+        contextRunner.withPropertyValues("spector.client.host=192.168.1.1","spector.client.port=36","spector.client.api_key=dgg").run(context -> {
             assertThat(context).hasSingleBean(SpectorClient.class);
+            SpectorClient client = context.getBean(SpectorClient.class);
+            assertThat(client.getBaseUrl()).isEqualTo("http://192.168.1.1:36");
         });
     }
 
