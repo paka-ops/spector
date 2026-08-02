@@ -23,6 +23,8 @@ import com.spectrayan.spector.provider.bedrock.BedrockProviderFactory;
 import com.spectrayan.spector.provider.embedding.EmbeddingConfig;
 import com.spectrayan.spector.provider.embedding.EmbeddingProvider;
 import com.spectrayan.spector.provider.embedding.EmbeddingResult;
+import com.spectrayan.spector.provider.embedding.generic.DenseDerivedSparseProvider;
+import com.spectrayan.spector.provider.embedding.generic.DenseDerivedTokenProvider;
 import com.spectrayan.spector.provider.generation.LlmProvider;
 import com.spectrayan.spector.memory.DefaultSpectorMemory;
 import com.spectrayan.spector.memory.graph.EntityExtractionMode;
@@ -33,6 +35,7 @@ import com.spectrayan.spector.metrics.MeteredSpectorMemory;
 import com.spectrayan.spector.metrics.SpectorMetrics;
 
 import com.spectrayan.spector.provider.google.GoogleProviderFactory;
+import com.spectrayan.spector.provider.langchain4j.LangChain4jHelper;
 import com.spectrayan.spector.provider.mistral.MistralProviderFactory;
 import com.spectrayan.spector.provider.ollama.OllamaEmbeddingProvider;
 import com.spectrayan.spector.provider.openai.OpenAiProviderFactory;
@@ -46,13 +49,17 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.*;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 
+import java.lang.reflect.Method;
 import java.nio.file.Path;
 import com.spectrayan.spector.commons.error.SpectorInternalException;
 import com.spectrayan.spector.commons.error.ErrorCode;
 import com.spectrayan.spector.mcp.tools.McpToolHandler;
 import com.spectrayan.spector.mcp.tools.SpectorToolRegistry;
+import org.springframework.context.annotation.Configuration;
+
 import java.util.List;
 
 /**
@@ -119,11 +126,11 @@ public class SpectorAutoConfiguration {
         //  SPLADE + ColBERT providers (auto-created from embedding provider)
         if (memoryProps.isSpladeEnabled()) {
             builder.SparseEmbeddingProvider(
-                    new com.spectrayan.spector.provider.embedding.generic.DenseDerivedSparseProvider(embedder));
+                    new DenseDerivedSparseProvider(embedder));
         }
         if (memoryProps.isColbertEnabled()) {
             builder.tokenEmbeddingProvider(
-                    new com.spectrayan.spector.provider.embedding.generic.DenseDerivedTokenProvider(embedder));
+                    new DenseDerivedTokenProvider(embedder));
         }
 
         SpectorMemory raw = builder.build();
@@ -143,18 +150,18 @@ public class SpectorAutoConfiguration {
         return raw;
     }
 
-    @org.springframework.context.annotation.Configuration
+    @Configuration
     static class SpringHttpClientAutoConfiguration {
-        SpringHttpClientAutoConfiguration(org.springframework.context.ApplicationContext context) {
+        SpringHttpClientAutoConfiguration(ApplicationContext context) {
             // 1. Try to find and register RestClient.Builder
             try {
                 Class<?> restClientBuilderClass = Class.forName("org.springframework.web.client.RestClient$Builder");
                 Object provider = context.getBeanProvider(restClientBuilderClass);
-                java.lang.reflect.Method getIfAvailable = provider.getClass().getMethod("getIfAvailable");
+                Method getIfAvailable = provider.getClass().getMethod("getIfAvailable");
                 Object builder = getIfAvailable.invoke(provider);
                 if (builder != null) {
                     log.info("[Spector] Auto-registering Spring RestClient.Builder in LangChain4jHelper");
-                    com.spectrayan.spector.provider.langchain4j.LangChain4jHelper.setSpringRestClientBuilder(builder);
+                    LangChain4jHelper.setSpringRestClientBuilder(builder);
                 }
             } catch (ClassNotFoundException e) {
                 // RestClient is not on the classpath
@@ -166,11 +173,11 @@ public class SpectorAutoConfiguration {
             try {
                 Class<?> webClientBuilderClass = Class.forName("org.springframework.web.reactive.function.client.WebClient$Builder");
                 Object provider = context.getBeanProvider(webClientBuilderClass);
-                java.lang.reflect.Method getIfAvailable = provider.getClass().getMethod("getIfAvailable");
+                Method getIfAvailable = provider.getClass().getMethod("getIfAvailable");
                 Object builder = getIfAvailable.invoke(provider);
                 if (builder != null) {
                     log.info("[Spector] Auto-registering Spring WebClient.Builder in LangChain4jHelper");
-                    com.spectrayan.spector.provider.langchain4j.LangChain4jHelper.setSpringWebClientBuilder(builder);
+                    LangChain4jHelper.setSpringWebClientBuilder(builder);
                 }
             } catch (ClassNotFoundException e) {
                 // WebClient is not on the classpath
@@ -184,7 +191,7 @@ public class SpectorAutoConfiguration {
      * Registers core MCP memory tools automatically when memory is available.
      */
     @Bean
-    @org.springframework.boot.autoconfigure.condition.ConditionalOnBean(SpectorMemory.class)
+    @ConditionalOnBean(SpectorMemory.class)
     @ConditionalOnMissingBean(name = "coreMemoryTools")
     public List<McpToolHandler> coreMemoryTools(SpectorMemory memory) {
         return SpectorToolRegistry.handlers("1.0.0", memory);
@@ -376,24 +383,31 @@ public class SpectorAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(SpectorClient.class)
-    @ConditionalOnProperties(
-            {
-                    @ConditionalOnProperty(prefix = "spector.client",name = "host",matchIfMissing = true),
-                    @ConditionalOnProperty(prefix = "spector.client",name = "port",matchIfMissing = true),
-                    @ConditionalOnProperty(prefix = "spector.client",name = "api_key",matchIfMissing = true)
-            })
+    @ConditionalOnProperty(prefix = "spector.client",name = "host")
     SpectorClient spectorClient(SpectorConfigProperties props){
-        if(props.getClient()!=null) return new SpectorClient( SpectorClient.builder());
-        return new SpectorClient(new SpectorClient.Builder()
-                .apiKey(props.getClient().getApi_key())
-                .host(props.getClient().getHost())
-                .port(props.getClient().getPort())
-                .requestTimeout(props.getClient().getRequestTimeout())
-                .maxConnections(props.getClient().getMaxConnexion())
-                .connectTimeout(props.getClient().getConnectTimeout())
+        SpectorConfigProperties.Client clientProps = props.getClient();
+        SpectorClient.Builder builder = SpectorClient.builder();
 
-        );
+        if (clientProps.getHost() != null) {
+            builder.host(clientProps.getHost());
+            if (clientProps.getPort() > 0) {
+                builder.port(clientProps.getPort());
+            }
+            if (clientProps.getApiKey() != null) {
+                builder.apiKey(clientProps.getApiKey());
+            }
+            if (clientProps.getRequestTimeout() != null) {
+                builder.requestTimeout(clientProps.getRequestTimeout());
+            }
+            if (clientProps.getConnectTimeout() != null) {
+                builder.connectTimeout(clientProps.getConnectTimeout());
+            }
+            if (clientProps.getMaxConnections() > 0) {
+                builder.maxConnections(clientProps.getMaxConnections());
+            }
 
+        }
+        return builder.build();
     }
     /**
      * Helper method to map {@link SpectorConfigProperties} to Spector's native {@link EmbeddingConfig}.
@@ -422,7 +436,7 @@ public class SpectorAutoConfiguration {
                 embedding.getProviderName(),
                 embedding.getType(),
                 embedding.getModel(),
-                embedding.getApi_key(),
+                embedding.getApiKey(),
                 embedding.getBaseUrl(),
                 embedding.getDimensions(),
                 embedding.getProperties()
