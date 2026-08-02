@@ -65,6 +65,26 @@ public class SpectorClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final Duration requestTimeout;
 
+    public String getBaseUrl() {
+        return baseUrl;
+    }
+
+    public String getApiKey() {
+        return apiKey;
+    }
+
+    public HttpClient getHttpClient() {
+        return httpClient;
+    }
+
+    public ObjectMapper getObjectMapper() {
+        return objectMapper;
+    }
+
+    public Duration getRequestTimeout() {
+        return requestTimeout;
+    }
+
     public SpectorClient(Builder builder) {
         this.baseUrl = "http://" + builder.host + ":" + builder.port;
         this.apiKey = builder.apiKey;
