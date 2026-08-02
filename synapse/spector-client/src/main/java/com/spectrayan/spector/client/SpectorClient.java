@@ -84,7 +84,7 @@ public class SpectorClient implements AutoCloseable {
     /**
      * Creates a new builder for SpectorClient.
      */
-    private static Builder builder() {
+    public static Builder builder() {
         return new Builder();
     }
 
