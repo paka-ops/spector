@@ -138,7 +138,7 @@ public class SpectorConfigProperties {
         private int batchSize = 32;
         private int maxConcurrent = 0;
         private Duration timeout;
-        private String api_key;
+        private String apiKey;
         private String providerName;
         private int dimensions;
         private Map<String,String> properties;
@@ -152,12 +152,12 @@ public class SpectorConfigProperties {
             this.timeout = timeout;
         }
 
-        public String getApi_key() {
-            return api_key;
+        public String getapiKey() {
+            return apiKey;
         }
 
-        public void setApi_key(String api_key) {
-            this.api_key = api_key;
+        public void setapiKey(String apiKey) {
+            this.apiKey = apiKey;
         }
 
         public String getProviderName() {
@@ -220,20 +220,20 @@ public class SpectorConfigProperties {
 
         return config;
     }
-    static class Client{
+    public static class Client{
         private String host;
         private int port;
-        private String api_key;
-        private int maxConnexion;
+        private String apiKey;
+        private int maxConnections;
         private Duration requestTimeout;
         private Duration connectTimeout;
 
-        public int getMaxConnexion() {
-            return maxConnexion;
+        public int getMaxConnections() {
+            return maxConnections;
         }
 
-        public void setMaxConnexion(int maxConnexion) {
-            this.maxConnexion = maxConnexion;
+        public void setMaxConnections(int maxConnections) {
+            this.maxConnections = maxConnections;
         }
 
         public Duration getRequestTimeout() {
@@ -268,12 +268,12 @@ public class SpectorConfigProperties {
             this.port = port;
         }
 
-        public String getApi_key() {
-            return api_key;
+        public String getApiKey() {
+            return apiKey;
         }
 
-        public void setApi_key(String api_key) {
-            this.api_key = api_key;
+        public void setApiKey(String apiKey) {
+            this.apiKey = apiKey;
         }
     }
 
